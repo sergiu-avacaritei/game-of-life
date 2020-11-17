@@ -6,13 +6,20 @@ import (
 	"uk.ac.bris.cs/gameoflife/util"
 )
 
+const alive = 255
+const dead = 0
+
 type distributorChannels struct {
 	events    chan<- Event
 	ioCommand chan<- ioCommand
 	ioIdle    <-chan bool
 }
 
-// returns the initial world as a 2-dimesional slice
+func mod(x, m int) int {
+	return (x + m) % m
+}
+
+// Return the initial world as a 2D slice.
 func getInitialWorld(p Params, c distributorChannels) [][]uint8 {
 
 	filePath := ("images/" + strconv.Itoa(p.ImageWidth) + "x" + strconv.Itoa(p.ImageHeight) + ".pgm")
@@ -36,6 +43,7 @@ func getInitialWorld(p Params, c distributorChannels) [][]uint8 {
 	return initialWorld
 }
 
+// Return all alive cells.
 func getCurrentAliveCells(world [][]uint8) []util.Cell {
 	var cells []util.Cell
 
@@ -51,13 +59,6 @@ func getCurrentAliveCells(world [][]uint8) []util.Cell {
 	}
 
 	return cells
-}
-
-const alive = 255
-const dead = 0
-
-func mod(x, m int) int {
-	return (x + m) % m
 }
 
 func calculateNeighbours(x, y int, world [][]uint8) int {
@@ -77,7 +78,9 @@ func calculateNeighbours(x, y int, world [][]uint8) int {
 	return neighbours
 }
 
-func calculateNextWorld(c distributorChannels, world [][]uint8, turn int) [][]uint8 {
+func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int) {
+	world := <-chunk
+
 	height := len(world)
 	width := len(world[0])
 
@@ -85,7 +88,8 @@ func calculateNextWorld(c distributorChannels, world [][]uint8, turn int) [][]ui
 	for i := range newWorld {
 		newWorld[i] = make([]byte, width)
 	}
-	for x := 0; x < height; x++ {
+
+	for x := 1; x < height-1; x++ {
 		for y := 0; y < width; y++ {
 			neighbours := calculateNeighbours(x, y, world)
 			if world[x][y] == alive {
@@ -107,7 +111,8 @@ func calculateNextWorld(c distributorChannels, world [][]uint8, turn int) [][]ui
 			}
 		}
 	}
-	return newWorld
+	newWorld = newWorld[1:(height - 1)]
+	chunk <- newWorld
 }
 
 // distributor divides the work between workers and interacts with other goroutines.
@@ -125,7 +130,39 @@ func distributor(p Params, c distributorChannels) {
 	turn := 0
 
 	for turn < p.Turns {
-		world = calculateNextWorld(c, world, turn)
+
+		chunk := make([]chan [][]byte, p.Threads)
+		worldsChunk := make([][][]uint8, p.Threads)
+
+		chunkWidth := p.ImageWidth / p.Threads
+
+		if p.Threads == 1 {
+			worldsChunk[0] = append([][]byte{world[p.ImageWidth-1]}, world...)
+			worldsChunk[0] = append(worldsChunk[0], [][]byte{world[0]}...)
+		} else {
+			//Making the world for the first thread
+			worldsChunk[0] = append([][]byte{world[p.ImageWidth-1]}, world[0:chunkWidth+1]...)
+			// Making the world for the last thread (if there is more than one thread)
+			worldsChunk[p.Threads-1] = append(world[((p.Threads-1)*chunkWidth-1):], [][]byte{world[0]}...)
+		}
+
+		var newWorld [][]byte
+		for i := 0; i < p.Threads; i++ { // Making the worlds for all the threads exept the first and the last
+			// ((chunkWidth * i) - 1) -> (chunkWidth * (i+1))
+			if i != 0 && i != p.Threads-1 {
+				worldsChunk[i] = world[(chunkWidth*i - 1):(chunkWidth*(i+1) + 1)]
+			}
+			chunk[i] = make(chan [][]byte)
+			go calculateNextWorld(c, chunk[i], turn)
+			chunk[i] <- worldsChunk[i]
+		}
+
+		for i := 0; i < p.Threads; i++ {
+			newWorld = append(newWorld, <-chunk[i]...)
+		}
+
+		world = newWorld
+
 		turn++
 		c.events <- TurnComplete{
 			CompletedTurns: turn,
