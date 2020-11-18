@@ -122,6 +122,41 @@ func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int) {
 	chunk <- newWorld
 }
 
+func calculateParallelStep(p Params, c distributorChannels, turn int, world [][]uint8) [][]uint8 {
+
+	chunk := make([]chan [][]byte, p.Threads)
+	worldsChunk := make([][][]uint8, p.Threads)
+
+	chunkWidth := p.ImageWidth / p.Threads
+
+	if p.Threads == 1 {
+		worldsChunk[0] = append([][]byte{world[p.ImageWidth-1]}, world...)
+		worldsChunk[0] = append(worldsChunk[0], [][]byte{world[0]}...)
+	} else {
+		//Making the world for the first thread
+		worldsChunk[0] = append([][]byte{world[p.ImageWidth-1]}, world[0:chunkWidth+1]...)
+		// Making the world for the last thread (if there is more than one thread)
+		worldsChunk[p.Threads-1] = append(world[((p.Threads-1)*chunkWidth-1):], [][]byte{world[0]}...)
+	}
+
+	var newWorld [][]byte
+	for i := 0; i < p.Threads; i++ { // Making the worlds for all the threads exept the first and the last
+		// ((chunkWidth * i) - 1) -> (chunkWidth * (i+1))
+		if i != 0 && i != p.Threads-1 {
+			worldsChunk[i] = world[(chunkWidth*i - 1):(chunkWidth*(i+1) + 1)]
+		}
+		chunk[i] = make(chan [][]byte)
+		go calculateNextWorld(c, chunk[i], turn)
+		chunk[i] <- worldsChunk[i]
+	}
+
+	for i := 0; i < p.Threads; i++ {
+		newWorld = append(newWorld, <-chunk[i]...)
+	}
+
+	return newWorld
+}
+
 // distributor divides the work between workers and interacts with other goroutines.
 func distributor(p Params, c distributorChannels) {
 
@@ -141,37 +176,7 @@ func distributor(p Params, c distributorChannels) {
 
 	for turn < p.Turns {
 
-		chunk := make([]chan [][]byte, p.Threads)
-		worldsChunk := make([][][]uint8, p.Threads)
-
-		chunkWidth := p.ImageWidth / p.Threads
-
-		if p.Threads == 1 {
-			worldsChunk[0] = append([][]byte{world[p.ImageWidth-1]}, world...)
-			worldsChunk[0] = append(worldsChunk[0], [][]byte{world[0]}...)
-		} else {
-			//Making the world for the first thread
-			worldsChunk[0] = append([][]byte{world[p.ImageWidth-1]}, world[0:chunkWidth+1]...)
-			// Making the world for the last thread (if there is more than one thread)
-			worldsChunk[p.Threads-1] = append(world[((p.Threads-1)*chunkWidth-1):], [][]byte{world[0]}...)
-		}
-
-		var newWorld [][]byte
-		for i := 0; i < p.Threads; i++ { // Making the worlds for all the threads exept the first and the last
-			// ((chunkWidth * i) - 1) -> (chunkWidth * (i+1))
-			if i != 0 && i != p.Threads-1 {
-				worldsChunk[i] = world[(chunkWidth*i - 1):(chunkWidth*(i+1) + 1)]
-			}
-			chunk[i] = make(chan [][]byte)
-			go calculateNextWorld(c, chunk[i], turn)
-			chunk[i] <- worldsChunk[i]
-		}
-
-		for i := 0; i < p.Threads; i++ {
-			newWorld = append(newWorld, <-chunk[i]...)
-		}
-
-		world = newWorld
+		world = calculateParallelStep(p, c, turn, world)
 
 		turn++
 		c.events <- TurnComplete{
