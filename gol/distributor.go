@@ -1,7 +1,7 @@
 package gol
 
 import (
-	"strconv"
+	"fmt"
 
 	"uk.ac.bris.cs/gameoflife/util"
 )
@@ -10,9 +10,12 @@ const alive = 255
 const dead = 0
 
 type distributorChannels struct {
-	events    chan<- Event
-	ioCommand chan<- ioCommand
-	ioIdle    <-chan bool
+	events     chan<- Event
+	ioCommand  chan<- ioCommand
+	ioIdle     <-chan bool
+	ioFilename chan<- string
+	ioOutput   chan<- uint8
+	ioInput    <-chan uint8
 }
 
 func mod(x, m int) int {
@@ -22,14 +25,18 @@ func mod(x, m int) int {
 // Return the initial world as a 2D slice.
 func getInitialWorld(p Params, c distributorChannels) [][]uint8 {
 
-	filePath := ("images/" + strconv.Itoa(p.ImageWidth) + "x" + strconv.Itoa(p.ImageHeight) + ".pgm")
-
-	aliveCells := util.ReadAliveCells(filePath, p.ImageWidth, p.ImageHeight)
-
-	initialWorld := make([][]uint8, p.ImageWidth)
+	initialWorld := make([][]byte, p.ImageHeight)
 	for i := range initialWorld {
-		initialWorld[i] = make([]uint8, p.ImageHeight)
+		initialWorld[i] = make([]byte, p.ImageWidth)
 	}
+
+	for x := 0; x < p.ImageHeight; x++ {
+		for y := 0; y < p.ImageWidth; y++ {
+			initialWorld[y][x] = <-c.ioInput // (Y,X) !!!!!!
+		}
+	}
+
+	aliveCells := getCurrentAliveCells(initialWorld) // Could do this in the for-loop above! (tiny improvement)
 
 	for _, x := range aliveCells {
 		initialWorld[x.X][x.Y] = 255
@@ -118,9 +125,12 @@ func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int) {
 // distributor divides the work between workers and interacts with other goroutines.
 func distributor(p Params, c distributorChannels) {
 
+	// READ
+	c.ioCommand <- 1
+	c.ioFilename <- fmt.Sprintf("%vx%v", p.ImageWidth, p.ImageHeight)
+
 	// TODO: Create a 2D slice to store the world.
 	// TODO: For all initially alive cells send a CellFlipped Event.
-
 	world := getInitialWorld(p, c)
 
 	// TODO: Execute all turns of the Game of Life.
@@ -166,6 +176,15 @@ func distributor(p Params, c distributorChannels) {
 		turn++
 		c.events <- TurnComplete{
 			CompletedTurns: turn,
+		}
+	}
+
+	// WRITE
+	c.ioCommand <- 0
+	c.ioFilename <- fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, p.Turns)
+	for x := 0; x < p.ImageHeight; x++ {
+		for y := 0; y < p.ImageWidth; y++ {
+			c.ioOutput <- world[y][x]
 		}
 	}
 
