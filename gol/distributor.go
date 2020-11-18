@@ -11,12 +11,13 @@ const alive = 255
 const dead = 0
 
 type distributorChannels struct {
-	events     chan<- Event
-	ioCommand  chan<- ioCommand
-	ioIdle     <-chan bool
-	ioFilename chan<- string
-	ioOutput   chan<- uint8
-	ioInput    <-chan uint8
+	events        chan<- Event
+	ioCommand     chan<- ioCommand
+	ioIdle        <-chan bool
+	ioFilename    chan<- string
+	ioOutput      chan<- uint8
+	ioInput       <-chan uint8
+	sdlKeyPresses <-chan rune
 }
 
 func mod(x, m int) int {
@@ -86,7 +87,7 @@ func calculateNeighbours(x, y int, world [][]uint8) int {
 	return neighbours
 }
 
-func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int) {
+func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int, offset int) {
 	world := <-chunk
 
 	height := len(world)
@@ -106,12 +107,16 @@ func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int) {
 				} else {
 					c.events <- CellFlipped{
 						CompletedTurns: turn,
-						Cell:           util.Cell{X: x, Y: y},
+						Cell:           util.Cell{X: x + offset, Y: y},
 					}
 					newWorld[x][y] = dead
 				}
 			} else {
 				if neighbours == 3 {
+					c.events <- CellFlipped{
+						CompletedTurns: turn,
+						Cell:           util.Cell{X: x + offset, Y: y},
+					}
 					newWorld[x][y] = alive
 				} else {
 					newWorld[x][y] = dead
@@ -146,8 +151,9 @@ func calculateParallelStep(p Params, c distributorChannels, turn int, world [][]
 		if i != 0 && i != p.Threads-1 {
 			worldsChunk[i] = world[(chunkWidth*i - 1):(chunkWidth*(i+1) + 1)]
 		}
+		offset := i * chunkWidth
 		chunk[i] = make(chan [][]byte)
-		go calculateNextWorld(c, chunk[i], turn)
+		go calculateNextWorld(c, chunk[i], turn, offset)
 		chunk[i] <- worldsChunk[i]
 	}
 
@@ -156,6 +162,96 @@ func calculateParallelStep(p Params, c distributorChannels, turn int, world [][]
 	}
 
 	return newWorld
+}
+
+func writePgm(p Params, c distributorChannels, turn int, world [][]uint8) {
+	fileName := fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, p.Turns)
+	c.ioCommand <- 0
+	c.ioFilename <- fileName
+	for x := 0; x < p.ImageHeight; x++ {
+		for y := 0; y < p.ImageWidth; y++ {
+			c.ioOutput <- world[y][x]
+		}
+	}
+	c.events <- ImageOutputComplete{turn, fileName}
+}
+
+func manageSdlInput(p Params, c distributorChannels, turn *int, world *[][]uint8, done chan bool, ticker *ticker) {
+	select {
+	case x := <-c.sdlKeyPresses:
+		if x == 's' {
+			writePgm(p, c, *turn, *world)
+		} else if x == 'q' {
+			writePgm(p, c, *turn, *world)
+			closeProgramm(c, *turn, done, ticker)
+			return
+		} else if x == 'p' {
+			ticker.stopTicker(done)
+			c.events <- StateChange{*turn, Paused}
+			resume := 'N'
+			for resume != 'p' {
+				resume = <-c.sdlKeyPresses
+				if resume == 's' {
+					writePgm(p, c, *turn, *world)
+				} else if resume == 'q' {
+					writePgm(p, c, *turn, *world)
+					closeProgramm(c, *turn, done, ticker)
+					return
+				}
+			}
+			ticker.resetTicker(c, turn, world, done)
+			fmt.Println("Continuing")
+			c.events <- StateChange{*turn, Executing}
+
+		}
+	default:
+	}
+}
+
+func closeProgramm(c distributorChannels, turn int, done chan bool, ticker *ticker) {
+	ticker.ticker.Stop()
+	done <- true
+
+	// Make sure that the Io has finished any output before exiting.
+	c.ioCommand <- ioCheckIdle
+	<-c.ioIdle
+
+	c.events <- StateChange{turn, Quitting}
+	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+	close(c.events)
+}
+
+type ticker struct {
+	period time.Duration
+	ticker time.Ticker
+}
+
+func createTicker(period time.Duration) *ticker {
+	return &ticker{period, *time.NewTicker(period)}
+}
+
+func (t *ticker) stopTicker(done chan bool) {
+	t.ticker.Stop()
+	done <- true
+}
+
+func (t *ticker) resetTicker(c distributorChannels, turn *int, world *[][]uint8, done chan bool) {
+	t.ticker = *time.NewTicker(t.period)
+	tickerRun(c, turn, world, done, t)
+}
+
+func tickerRun(c distributorChannels, turn *int, world *[][]uint8, done chan bool, ticker *ticker) {
+
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.ticker.C:
+				c.events <- AliveCellsCount{*turn, len(getCurrentAliveCells(*world))}
+			}
+		}
+	}()
 }
 
 // distributor divides the work between workers and interacts with other goroutines.
@@ -175,21 +271,14 @@ func distributor(p Params, c distributorChannels) {
 
 	turn := 0
 
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := createTicker(2 * time.Second)
 	done := make(chan bool)
 
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				c.events <- AliveCellsCount{turn, len(getCurrentAliveCells(world))}
-			}
-		}
-	}()
+	tickerRun(c, &turn, &world, done, ticker)
 
 	for turn < p.Turns {
+
+		manageSdlInput(p, c, &turn, &world, done, ticker)
 
 		world = calculateParallelStep(p, c, turn, world)
 
@@ -200,25 +289,12 @@ func distributor(p Params, c distributorChannels) {
 	}
 
 	// WRITE
-	c.ioCommand <- 0
-	c.ioFilename <- fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, p.Turns)
-	for x := 0; x < p.ImageHeight; x++ {
-		for y := 0; y < p.ImageWidth; y++ {
-			c.ioOutput <- world[y][x]
-		}
-	}
+	writePgm(p, c, turn, world)
 
 	c.events <- FinalTurnComplete{
 		CompletedTurns: turn,
 		Alive:          getCurrentAliveCells(world),
 	}
 
-	// Make sure that the Io has finished any output before exiting.
-	done <- true
-	c.ioCommand <- ioCheckIdle
-	<-c.ioIdle
-
-	c.events <- StateChange{turn, Quitting}
-	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
-	close(c.events)
+	closeProgramm(c, turn, done, ticker)
 }
