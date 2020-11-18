@@ -2,6 +2,7 @@ package gol
 
 import (
 	"fmt"
+	"time"
 
 	"uk.ac.bris.cs/gameoflife/util"
 )
@@ -174,6 +175,20 @@ func distributor(p Params, c distributorChannels) {
 
 	turn := 0
 
+	ticker := time.NewTicker(2 * time.Second)
+	done := make(chan bool)
+
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				c.events <- AliveCellsCount{turn, len(getCurrentAliveCells(world))}
+			}
+		}
+	}()
+
 	for turn < p.Turns {
 
 		world = calculateParallelStep(p, c, turn, world)
@@ -199,6 +214,7 @@ func distributor(p Params, c distributorChannels) {
 	}
 
 	// Make sure that the Io has finished any output before exiting.
+	done <- true
 	c.ioCommand <- ioCheckIdle
 	<-c.ioIdle
 
