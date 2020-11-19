@@ -107,7 +107,7 @@ func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int, o
 				} else {
 					c.events <- CellFlipped{
 						CompletedTurns: turn,
-						Cell:           util.Cell{X: x + offset, Y: y},
+						Cell:           util.Cell{X: x + offset - 1, Y: y},
 					}
 					newWorld[x][y] = dead
 				}
@@ -115,7 +115,7 @@ func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int, o
 				if neighbours == 3 {
 					c.events <- CellFlipped{
 						CompletedTurns: turn,
-						Cell:           util.Cell{X: x + offset, Y: y},
+						Cell:           util.Cell{X: x + offset - 1, Y: y},
 					}
 					newWorld[x][y] = alive
 				} else {
