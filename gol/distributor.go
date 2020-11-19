@@ -176,7 +176,7 @@ func writePgm(p Params, c distributorChannels, turn int, world [][]uint8) {
 	c.events <- ImageOutputComplete{turn, fileName}
 }
 
-func manageSdlInput(p Params, c distributorChannels, turn *int, world *[][]uint8, done chan bool, ticker *ticker) {
+func manageSdlInput(p Params, c distributorChannels, turn *int, world *[][]uint8, done chan bool, ticker *ticker) bool {
 	select {
 	case x := <-c.sdlKeyPresses:
 		if x == 's' {
@@ -184,7 +184,7 @@ func manageSdlInput(p Params, c distributorChannels, turn *int, world *[][]uint8
 		} else if x == 'q' {
 			writePgm(p, c, *turn, *world)
 			closeProgramm(c, *turn, done, ticker)
-			return
+			return true
 		} else if x == 'p' {
 			ticker.stopTicker(done)
 			c.events <- StateChange{*turn, Paused}
@@ -196,7 +196,7 @@ func manageSdlInput(p Params, c distributorChannels, turn *int, world *[][]uint8
 				} else if resume == 'q' {
 					writePgm(p, c, *turn, *world)
 					closeProgramm(c, *turn, done, ticker)
-					return
+					return true
 				}
 			}
 			ticker.resetTicker(c, turn, world, done)
@@ -205,7 +205,9 @@ func manageSdlInput(p Params, c distributorChannels, turn *int, world *[][]uint8
 
 		}
 	default:
+		return false
 	}
+	return false
 }
 
 func closeProgramm(c distributorChannels, turn int, done chan bool, ticker *ticker) {
@@ -278,7 +280,9 @@ func distributor(p Params, c distributorChannels) {
 
 	for turn < p.Turns {
 
-		manageSdlInput(p, c, &turn, &world, done, ticker)
+		if manageSdlInput(p, c, &turn, &world, done, ticker) {
+			return
+		}
 
 		world = calculateParallelStep(p, c, turn, world)
 
