@@ -14,7 +14,7 @@ var p = gol.Params{
 	ImageHeight: 512,
 }
 
-func Benchmark(b *testing.B) {
+func Benchmark512x512(b *testing.B) {
 	p.Threads = 1
 	for threads := 1; threads <= 16; threads = threads + 1 {
 		p.Threads = threads
