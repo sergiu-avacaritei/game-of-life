@@ -17,6 +17,12 @@ func Run(p Params, events chan<- Event, keyPresses <-chan rune) {
 	ioOutput := make(chan uint8)
 	ioInput := make(chan uint8)
 
+	var stopResume [16]chan bool
+
+	for i := 0; i < 16; i++ {
+		stopResume[i] = make(chan bool, 2)
+	}
+
 	distributorChannels := distributorChannels{
 		events,
 		ioCommand,
@@ -25,6 +31,7 @@ func Run(p Params, events chan<- Event, keyPresses <-chan rune) {
 		ioOutput,
 		ioInput,
 		keyPresses,
+		stopResume,
 	}
 	go distributor(p, distributorChannels)
 

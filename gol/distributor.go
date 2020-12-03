@@ -18,6 +18,7 @@ type distributorChannels struct {
 	ioOutput      chan<- uint8
 	ioInput       <-chan uint8
 	sdlKeyPresses <-chan rune
+	stopResume    [16]chan bool
 }
 
 func mod(x, m int) int {
@@ -87,7 +88,11 @@ func calculateNeighbours(x, y int, world [][]uint8) int {
 	return neighbours
 }
 
-func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int, offset int) {
+func doThis() {
+	fmt.Println("Hi Bitch")
+}
+
+func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int, offset int, routineNumber int) {
 	world := <-chunk
 
 	height := len(world)
@@ -100,6 +105,15 @@ func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int, o
 
 	for x := 1; x < height-1; x++ {
 		for y := 0; y < width; y++ {
+
+			select {
+			case coco := <-c.stopResume[routineNumber]:
+				fmt.Println("I Stopped ", coco)
+				<-c.stopResume[routineNumber]
+				fmt.Println("I resumed ")
+			default:
+			}
+
 			neighbours := calculateNeighbours(x, y, world)
 			if world[x][y] == alive {
 				if neighbours == 2 || neighbours == 3 {
@@ -153,7 +167,7 @@ func calculateParallelStep(p Params, c distributorChannels, turn int, world [][]
 		}
 		offset := i * chunkWidth
 		chunk[i] = make(chan [][]byte)
-		go calculateNextWorld(c, chunk[i], turn, offset)
+		go calculateNextWorld(c, chunk[i], turn, offset, i)
 		chunk[i] <- worldsChunk[i]
 	}
 
@@ -176,6 +190,23 @@ func writePgm(p Params, c distributorChannels, turn int, world [][]uint8) {
 	c.events <- ImageOutputComplete{turn, fileName}
 }
 
+func pauseNow(done chan bool, p Params, c distributorChannels, ticker *ticker, turn *int) {
+	for i := 0; i < p.Threads; i++ {
+		c.stopResume[i] <- true
+	}
+	ticker.stopTicker(done)
+	c.events <- StateChange{*turn, Paused}
+}
+
+func resumeNow(done chan bool, p Params, c distributorChannels, ticker *ticker, turn *int, world *[][]byte) {
+	for i := 0; i < p.Threads; i++ {
+		c.stopResume[i] <- false
+	}
+	ticker.resetTicker(c, turn, world, done)
+	fmt.Println("Continuing")
+	c.events <- StateChange{*turn, Executing}
+}
+
 func manageSdlInput(p Params, c distributorChannels, turn *int, world *[][]uint8, done chan bool, ticker *ticker) bool {
 	select {
 	case x := <-c.sdlKeyPresses:
@@ -186,8 +217,7 @@ func manageSdlInput(p Params, c distributorChannels, turn *int, world *[][]uint8
 			closeProgramm(c, *turn, done, ticker)
 			return true
 		} else if x == 'p' {
-			ticker.stopTicker(done)
-			c.events <- StateChange{*turn, Paused}
+			pauseNow(done, p, c, ticker, turn)
 			resume := 'N'
 			for resume != 'p' {
 				resume = <-c.sdlKeyPresses
@@ -195,13 +225,14 @@ func manageSdlInput(p Params, c distributorChannels, turn *int, world *[][]uint8
 					writePgm(p, c, *turn, *world)
 				} else if resume == 'q' {
 					writePgm(p, c, *turn, *world)
-					closeProgramm(c, *turn, done, ticker)
+					c.ioCommand <- ioCheckIdle
+					<-c.ioIdle
+					c.events <- StateChange{*turn, Quitting}
+					close(c.events)
 					return true
 				}
 			}
-			ticker.resetTicker(c, turn, world, done)
-			fmt.Println("Continuing")
-			c.events <- StateChange{*turn, Executing}
+			resumeNow(done, p, c, ticker, turn, world)
 
 		}
 	default:
