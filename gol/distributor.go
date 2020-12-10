@@ -138,40 +138,131 @@ func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int, o
 	chunk <- newWorld
 }
 
-func calculateParallelStep(p Params, c distributorChannels, turn int, world [][]uint8) [][]uint8 {
+func calculateWorld(p Params, c distributorChannels, world [][]uint8) {
+
+	ticker := createTicker(2 * time.Second)
+	done := make(chan bool)
+	var turn int
+	var numberAlive int
+
+	tickerRun(c, &turn, &numberAlive, done, ticker)
+
+	newWorld := append([][]byte{world[p.ImageWidth-1]}, world...)
+	newWorld = append(newWorld, [][]byte{world[0]}...)
+	for turn = 0; turn < p.Turns; turn++ {
+
+		if manageSdlInput(p, c, &turn, &world, done, ticker, &numberAlive) {
+			return
+		}
+
+		chunk := make(chan [][]byte)
+		go calculateNextWorld(c, chunk, turn, 0, 0)
+		chunk <- newWorld
+
+		newWorld = <-chunk
+		world = newWorld
+		newWorld = append([][]byte{newWorld[p.ImageWidth-1]}, newWorld...)
+		newWorld = append(newWorld, [][]byte{newWorld[1]}...)
+
+		c.events <- TurnComplete{
+			CompletedTurns: turn,
+		}
+		numberAlive = len(getCurrentAliveCells(world))
+	}
+
+	//world = world[1 : p.ImageWidth-1]
+
+	writePgm(p, c, p.Turns, world)
+
+	c.events <- FinalTurnComplete{
+		CompletedTurns: p.Turns,
+		Alive:          getCurrentAliveCells(world),
+	}
+
+	closeProgramm(c, p.Turns, done, ticker)
+}
+
+func calculateWorldParallel(p Params, c distributorChannels, world [][]uint8) {
 
 	chunk := make([]chan [][]byte, p.Threads)
 	worldsChunk := make([][][]uint8, p.Threads)
 
 	chunkWidth := p.ImageWidth / p.Threads
 
-	if p.Threads == 1 {
-		worldsChunk[0] = append([][]byte{world[p.ImageWidth-1]}, world...)
-		worldsChunk[0] = append(worldsChunk[0], [][]byte{world[0]}...)
-	} else {
-		//Making the world for the first thread
-		worldsChunk[0] = append([][]byte{world[p.ImageWidth-1]}, world[0:chunkWidth+1]...)
-		// Making the world for the last thread (if there is more than one thread)
-		worldsChunk[p.Threads-1] = append(world[((p.Threads-1)*chunkWidth-1):], [][]byte{world[0]}...)
+	//Making the world for the first thread
+	worldsChunk[0] = append([][]byte{world[p.ImageWidth-1]}, world[0:chunkWidth+1]...)
+	// Making the world for the last thread (if there is more than one thread)
+	worldsChunk[p.Threads-1] = append(world[((p.Threads-1)*chunkWidth-1):], [][]byte{world[0]}...)
+
+	for i := 1; i < p.Threads-1; i++ {
+		worldsChunk[i] = world[(chunkWidth*i - 1):(chunkWidth*(i+1) + 1)]
+	}
+	// Now we have all the worldsChunk
+
+	//make another for statement for p.Threads = 1
+
+	ticker := createTicker(2 * time.Second)
+	done := make(chan bool)
+	var turn int
+	var numberAlive int
+
+	tickerRun(c, &turn, &numberAlive, done, ticker)
+
+	for turn = 0; turn < p.Turns; turn++ {
+
+		if manageSdlInput(p, c, &turn, &world, done, ticker, &numberAlive) {
+			return
+		}
+
+		for i := 0; i < p.Threads; i++ { // Making the worlds for all the threads exept the first and the last
+			// ((chunkWidth * i) - 1) -> (chunkWidth * (i+1))
+			offset := i * chunkWidth
+			chunk[i] = make(chan [][]byte)
+			go calculateNextWorld(c, chunk[i], turn, offset, i)
+			chunk[i] <- worldsChunk[i]
+		}
+
+		// for i := 0; i < p.Threads; i++ {
+		// 	newWorld = append(newWorld, <-chunk[i]...)
+		// }
+		//instead of appending the whole world, append only the lines that need to be appended for each chunk
+		numberAliveThisTurn := 0
+		for i := 0; i < p.Threads; i++ {
+			worldsChunk[i] = <-chunk[i]
+			numberAliveThisTurn += len(getCurrentAliveCells(worldsChunk[i]))
+		}
+
+		worldsChunk[0] = append([][]byte{worldsChunk[p.Threads-1][len(worldsChunk[p.Threads-1])-1]}, worldsChunk[0]...)
+		worldsChunk[0] = append(worldsChunk[0], [][]byte{worldsChunk[1][0]}...)
+
+		for i := 1; i < p.Threads-1; i++ {
+			worldsChunk[i] = append([][]byte{worldsChunk[i-1][len(worldsChunk[i-1])-2]}, worldsChunk[i]...)
+			worldsChunk[i] = append(worldsChunk[i], [][]byte{worldsChunk[i+1][0]}...)
+		}
+
+		worldsChunk[p.Threads-1] = append([][]byte{worldsChunk[p.Threads-2][len(worldsChunk[p.Threads-2])-2]}, worldsChunk[p.Threads-1]...)
+		worldsChunk[p.Threads-1] = append(worldsChunk[p.Threads-1], [][]byte{worldsChunk[0][1]}...)
+
+		c.events <- TurnComplete{
+			CompletedTurns: turn,
+		}
+		numberAlive = numberAliveThisTurn
 	}
 
-	var newWorld [][]byte
-	for i := 0; i < p.Threads; i++ { // Making the worlds for all the threads exept the first and the last
-		// ((chunkWidth * i) - 1) -> (chunkWidth * (i+1))
-		if i != 0 && i != p.Threads-1 {
-			worldsChunk[i] = world[(chunkWidth*i - 1):(chunkWidth*(i+1) + 1)]
-		}
-		offset := i * chunkWidth
-		chunk[i] = make(chan [][]byte)
-		go calculateNextWorld(c, chunk[i], turn, offset, i)
-		chunk[i] <- worldsChunk[i]
-	}
+	var resultWorld [][]uint8
 
 	for i := 0; i < p.Threads; i++ {
-		newWorld = append(newWorld, <-chunk[i]...)
+		resultWorld = append(resultWorld, worldsChunk[i][1:(len(worldsChunk[i])-1)]...)
 	}
 
-	return newWorld
+	writePgm(p, c, p.Turns, resultWorld)
+
+	c.events <- FinalTurnComplete{
+		CompletedTurns: p.Turns,
+		Alive:          getCurrentAliveCells(resultWorld),
+	}
+
+	closeProgramm(c, p.Turns, done, ticker)
 }
 
 func writePgm(p Params, c distributorChannels, turn int, world [][]uint8) {
@@ -194,16 +285,16 @@ func pauseNow(done chan bool, p Params, c distributorChannels, ticker *ticker, t
 	c.events <- StateChange{*turn, Paused}
 }
 
-func resumeNow(done chan bool, p Params, c distributorChannels, ticker *ticker, turn *int, world *[][]byte) {
+func resumeNow(done chan bool, p Params, c distributorChannels, ticker *ticker, turn *int, numberAlive *int) {
 	for i := 0; i < p.Threads; i++ {
 		c.stopResume[i] <- false
 	}
-	ticker.resetTicker(c, turn, world, done)
+	ticker.resetTicker(c, turn, numberAlive, done)
 	fmt.Println("Continuing")
 	c.events <- StateChange{*turn, Executing}
 }
 
-func manageSdlInput(p Params, c distributorChannels, turn *int, world *[][]uint8, done chan bool, ticker *ticker) bool {
+func manageSdlInput(p Params, c distributorChannels, turn *int, world *[][]uint8, done chan bool, ticker *ticker, numberAlive *int) bool {
 	select {
 	case x := <-c.sdlKeyPresses:
 		if x == 's' {
@@ -228,7 +319,7 @@ func manageSdlInput(p Params, c distributorChannels, turn *int, world *[][]uint8
 					return true
 				}
 			}
-			resumeNow(done, p, c, ticker, turn, world)
+			resumeNow(done, p, c, ticker, turn, numberAlive)
 
 		}
 	default:
@@ -264,12 +355,12 @@ func (t *ticker) stopTicker(done chan bool) {
 	done <- true
 }
 
-func (t *ticker) resetTicker(c distributorChannels, turn *int, world *[][]uint8, done chan bool) {
+func (t *ticker) resetTicker(c distributorChannels, turn *int, numberAlive *int, done chan bool) {
 	t.ticker = *time.NewTicker(t.period)
-	tickerRun(c, turn, world, done, t)
+	tickerRun(c, turn, numberAlive, done, t)
 }
 
-func tickerRun(c distributorChannels, turn *int, world *[][]uint8, done chan bool, ticker *ticker) {
+func tickerRun(c distributorChannels, turn *int, numberAlive *int, done chan bool, ticker *ticker) {
 
 	go func() {
 		for {
@@ -277,7 +368,7 @@ func tickerRun(c distributorChannels, turn *int, world *[][]uint8, done chan boo
 			case <-done:
 				return
 			case <-ticker.ticker.C:
-				c.events <- AliveCellsCount{*turn, len(getCurrentAliveCells(*world))}
+				c.events <- AliveCellsCount{*turn, *numberAlive}
 			}
 		}
 	}()
@@ -298,34 +389,10 @@ func distributor(p Params, c distributorChannels) {
 	// TODO: Send correct Events when required, e.g. CellFlipped, TurnComplete and FinalTurnComplete.
 	//		 See event.go for a list of all events.
 
-	turn := 0
-
-	ticker := createTicker(2 * time.Second)
-	done := make(chan bool)
-
-	tickerRun(c, &turn, &world, done, ticker)
-
-	for turn < p.Turns {
-
-		if manageSdlInput(p, c, &turn, &world, done, ticker) {
-			return
-		}
-
-		world = calculateParallelStep(p, c, turn, world)
-
-		turn++
-		c.events <- TurnComplete{
-			CompletedTurns: turn,
-		}
+	if p.Threads == 1 {
+		calculateWorld(p, c, world)
+		return
 	}
 
-	// WRITE
-	writePgm(p, c, turn, world)
-
-	c.events <- FinalTurnComplete{
-		CompletedTurns: turn,
-		Alive:          getCurrentAliveCells(world),
-	}
-
-	closeProgramm(c, turn, done, ticker)
+	calculateWorldParallel(p, c, world)
 }
