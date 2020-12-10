@@ -88,10 +88,6 @@ func calculateNeighbours(x, y int, world [][]uint8) int {
 	return neighbours
 }
 
-func doThis() {
-	fmt.Println("Hi Bitch")
-}
-
 func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int, offset int, routineNumber int) {
 	world := <-chunk
 
@@ -107,10 +103,10 @@ func calculateNextWorld(c distributorChannels, chunk chan [][]uint8, turn int, o
 		for y := 0; y < width; y++ {
 
 			select {
-			case coco := <-c.stopResume[routineNumber]:
-				fmt.Println("I Stopped ", coco)
-				<-c.stopResume[routineNumber]
-				fmt.Println("I resumed ")
+			case value1 := <-c.stopResume[routineNumber]:
+				fmt.Println("Goroutine [", routineNumber, "] has stopped. Its value is: ", value1)
+				value2 := <-c.stopResume[routineNumber]
+				fmt.Println("Goroutine [", routineNumber, "] has resumed. Its value is: ", value2)
 			default:
 			}
 
